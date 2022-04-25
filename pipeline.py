@@ -13,7 +13,7 @@ import imageio
 from skimage import io
 
 
-from celltracker import CellTracker
+from celltrack import CellTracker
 import pandas as pd
 
 def sort_file(INPUT_PATH):
