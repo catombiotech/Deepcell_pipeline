@@ -1,4 +1,4 @@
-# deepcell_pipeline
+# Deepcell_pipeline
 * A command line tool to help user segment cells with Deepcell.
 * Cell track along z-stack to better analyze bioinformatics.
 
