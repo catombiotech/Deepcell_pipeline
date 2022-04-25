@@ -1,35 +1,21 @@
 import numpy as np
 import matplotlib.pyplot as plt
-import cv2
-from skimage import measure,color
+from skimage import measure
 import math
-
+import sys
+import pandas as pd
 class CellTracker:
     """
     input:movie must be segmented mask to be further tracked.
     """
     def __init__(self, 
                  var_threshold=0.8,
+                 threshold_picking_methods='otsu',
                 opening_morphology_kwargs=None):
         self.var_threshold=var_threshold
         self.opening_morphology_kwargs = opening_morphology_kwargs
-        
-    def _get_bountries(self, movie):
-        """
-        return the bountries of every frame, the background is set to 255 and the boundtry line is set to 0
-        """
-        output = np.empty(movie.shape)
-        if len(movie.shape) != 3:
-            raise ValueError("Image dimension must be 3! ")
-        else:
-            for i in range(movie.shape[0]):
-                output[i] = np.full(movie.shape[1:],255)
-                for j in range(movie.shape[1]):
-                    for k in range(movie.shape[2]):
-                        if movie[i,j,k] < 2:
-                            output[i,j,k] = 0
-        return output 
-        
+        self.threshold_picking_methods = threshold_picking_methods
+    
     def _open_morphology(self, bountry_movie, opening_morphology_kwargs):
         """
         To perform opening operation on every images:
@@ -50,35 +36,33 @@ class CellTracker:
         
         return bountry_movie
         
-        
-    def _initial_label(self, bountry_movie):
-        init_labeled_movie = []
-        for i in range(bountry_movie.shape[0]):
-            init_labeled_movie.append(measure.label(bountry_movie[i],connectivity=1))
-        return init_labeled_movie
-    
-    def get_centroid(self, labeled_movie):
-        """
-        input：any labeled movie processed by skimage.measure.label
-        output: coordinate(x, y) and area of every property of every frame.
-        """
+    def _get_frame_centroid(self, frame):
+        properties = measure.regionprops(frame)
         x = []
         y = []
         area = []
-        for i in range(len(labeled_movie)):
-            x_stack, y_stack, area_stack = [], [], []
-            for j in range(labeled_movie[i].max()):
-                properties = measure.regionprops(labeled_movie[i])
-                y_, x_ = properties[j].centroid
-                area_ = properties[j].area
-                x_stack.append(x_)
-                y_stack.append(y_)
-                area_stack.append(area_)
-            x.append(x_stack)
-            y.append(y_stack)
-            area.append(area_stack)
 
+        for j in range(len(properties)): 
+            y_, x_ = properties[j].centroid
+            area_ = properties[j].area
+            x.append(x_)
+            y.append(y_)
+            area.append(area_)
         return x, y, area
+    
+    def _get_movie_centroid(self, movie):
+        x_all, y_all, area_all = [], [], []
+        j = 0
+        for frame in movie:
+            x, y, area = self._get_frame_centroid(frame)
+            x_all.append(x)
+            y_all.append(y)
+            area_all.append(area)
+            sys.stdout.write('\r' + str(j+1) + " / " + str(len(movie)) + " regionprops extracted")
+            sys.stdout.flush()
+            j += 1
+        return x_all, y_all, area_all
+
     
     def Distance(self, dot1, dot2):
         return math.sqrt(pow(dot1[0]-dot2[0],2)+pow(dot1[1]-dot2[1],2))
@@ -106,6 +90,9 @@ class CellTracker:
                     distance_row.append(self.Distance(dot_now[j],dot_pre[k]))
                 distance_matrix.append(distance_row)    
             distance.append(distance_matrix)
+            
+            sys.stdout.write('\r' + str(i+1) + " / " + str(len(x)-1) + " distanct matrix computed.")
+            sys.stdout.flush()
         return distance
     
     def _get_min(self, distance):
@@ -145,6 +132,32 @@ class CellTracker:
             threshold.append(threshold_frame)
         return threshold
     
+    def _otsu(self, row_frame_min):
+        data = np.sort(row_frame_min)
+        value, counts = np.unique(row_frame_min, return_counts=True)
+
+        n = len(row_frame_min)
+        u = np.mean(row_frame_min)
+        delta_square = np.empty((n, ))
+
+        for i in range(len(value)-1):
+            n0 = (i+1)
+            n1 = n - n0
+            u0 = np.sum(value[:i+1]*counts[:i+1])/n0
+            u1 = np.sum(value[i+1:]*counts[i+1:])/n1
+            d = n0*(u0-u)**2 + n1*(u1-u)**2
+            delta_square[i] = d
+        index = np.where(delta_square==np.max(delta_square,axis=0)) 
+
+        return value[index[0][0]-1]
+    
+    def _get_movie_otsu_thres(self, row_min):
+        thres_list = []
+        for min_list in row_min:
+            thres = self._otsu(min_list)
+            thres_list.append(thres)
+        return thres_list
+    
     def _final_label(self, x, threshold, row_min, row_min_index):
         all_label = []
         label_frame_first = np.arange(0,len(x[0]),1)
@@ -170,7 +183,7 @@ class CellTracker:
     
     def _fill_in(self, init_labeled_movie, all_label):
         temp = np.copy(init_labeled_movie)
-        good_img = np.empty(temp.shape)
+        good_img = np.zeros(temp.shape)
         for k in range(good_img.shape[0]):
             good_label = all_label[k]
             properties = measure.regionprops(init_labeled_movie[k])
@@ -181,26 +194,23 @@ class CellTracker:
 
         return good_img
     
-    def track(self, 
-              movie,
-              #var_threshold=0.8,
-              #opening_morphology_kwargs=None
-             ):
-              
-        bountry_movie = movie
-              
-        if self.opening_morphology_kwargs == None:
-            init_labeled_movie = self._initial_label(movie)
-        else:
-            bountry_movie = self._open_morphology(bountry_movie, self.opening_morphology_kwargs)
-            init_labeled_movie = self._initial_label(bountry_movie)
+    def track(self, movie):
         
-        x, y, area = self.get_centroid(init_labeled_movie)
+        if not self.opening_morphology_kwargs == None:
+            movie = self._open_morphology(movie, opening_morphology_kwargs=self.opening_morphology_kwargs)
+            
+   
+        x,y,area = self._get_movie_centroid(movie)
+        
         distance_matrix = self._get_distance(x, y)
         row_min, row_min_index = self._get_min(distance_matrix)
-        threshold = self._get_threshold(row_min, var_threshold=self.var_threshold)
+        #if self.threshold_picking_methods != 'ostu':
+         #   threshold = self._get_threshold(row_min, var_threshold=self.var_threshold)
+        #else:
+        threshold = self._get_movie_otsu_thres(row_min)
+            
         all_label = self._final_label(x, threshold, row_min, row_min_index)
               
-        tracked_movie = self._fill_in(init_labeled_movie, all_label)
+        tracked_movie = self._fill_in(movie, all_label)
         
         return tracked_movie, zip(x, y, area, all_label)
